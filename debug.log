@@ -1,0 +1,8 @@
+DEBUG [05/21/2024 08:59:11 PM] /home/cx872/anaconda3/envs/astra-sim/lib/python3.7/site-packages/chakra/et_converter/et_converter.py --input_type Text --input_filename ASTRA-sim-1.0/llama_test.txt --output_filename ASTRA-sim-2.0/llama_test/llama_test --num_npus 2 --num_dims 1 --num_passes 1
+DEBUG [05/21/2024 08:59:11 PM] Traceback (most recent call last):
+  File "/home/cx872/anaconda3/envs/astra-sim/lib/python3.7/site-packages/chakra/et_converter/et_converter.py", line 106, in main
+    converter.convert()
+  File "/home/cx872/anaconda3/envs/astra-sim/lib/python3.7/site-packages/chakra/et_converter/text2chakra_converter.py", line 146, in convert
+    with open(self.input_filename, "r") as f:
+FileNotFoundError: [Errno 2] No such file or directory: 'ASTRA-sim-1.0/llama_test.txt'
+
