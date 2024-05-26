@@ -27,6 +27,10 @@ class Layer:
             col = line.strip().split()
             self.name = col[0]
 
+            # Second rolumn (reserved) variable is used to indicate layer is trainable (>0)
+            self.is_trainable = int(col[1]) > 0  ## Modified chakra trace format
+            print(f"[DEBUG] (Text2Chakra) {self.is_trainable}")
+
             # forward
             self.fwd_comp_time = int(col[2])
             self.fwd_comm_type = str(col[3])
@@ -164,6 +168,8 @@ class Text2ChakraConverter:
                 self.convert_hybrid_data_model(f, num_layers)
             elif (parallelism_type == "HYBRID_MODEL_DATA"):
                 self.convert_hybrid_model_data(f, num_layers)
+            elif (parallelism_type == "CUSTOM"):
+                self.convert_custom_paralell(f, num_layers)
             elif (parallelism_type == "HYBRID_DLRM")\
                     or (parallelism_type == "HYBRID_DLRM_ENHANCED"):
                 last_bottom_layer = int(first_line[1])
@@ -254,6 +260,145 @@ class Text2ChakraConverter:
 
                 for layer in layers:
                     layer.bwd_wg_comm_node = None
+                    
+    def convert_custom_paralell(
+        self,
+        f: TextIOWrapper,
+        num_layers: int
+    ) -> None:
+        
+        ## set types. 
+        """
+        - "FP"       frozen layer with no trainable layer beneath it
+        - "FP+IG"    frozen layer with trainable layer beneath it
+        - "FP+IG+WG" trainable layer with trainable layer beneath
+        - "FP+WG"    trainable layer without trainable layer beneath
+        """
+        self.layer_types = []
+        layers = self.get_layers(f, num_layers)
+        print(layers, len(layers))
+        
+        for layer_id in range(num_layers):
+            has_trainable_underneath = False
+            for j in range(0, layer_id):
+                if layers[j].is_trainable:
+                    has_trainable_underneath = True
+                    break
+
+            if layers[layer_id].is_trainable:
+                if has_trainable_underneath:
+                    self.layer_types.append("FP+IG+WG")
+                else:
+                    self.layer_types.append("FP+WG")
+            else:
+                if has_trainable_underneath:
+                    self.layer_types.append("FP+IG")
+                else:
+                    self.layer_types.append("FP") 
+                
+        for i, type in enumerate(self.layer_types)           :
+            print(i, type)
+        #### #### ####
+        ## TODO: add the assignment list effect
+        #### #### ####
+        for npu_id in range(self.num_npus):
+            output_filename = "%s.%d.et" % (self.output_filename, npu_id)
+            with open(output_filename, "wb") as g:
+                # Ensure chakra correctness
+                global_metadata = self.get_global_metadata()
+                encode_message(g, global_metadata)
+                
+                for _ in range(self.num_passes):  # unused
+                    fwd_comp_node = None
+
+                    # forward pass
+                    for idx, layer in enumerate(layers):
+                        fwd_comp_node = self.get_comp_node(
+                                layer.name, "FWD",
+                                layer.fwd_comp_time)
+                        if idx != 0:
+                            self.add_parent(fwd_comp_node, layers[idx-1].fwd_comp_node)
+                        # if layer.bwd_wg_comm_node != None:
+                        #     self.add_parent(fwd_comp_node, layer.bwd_wg_comm_node)
+                        layer.fwd_comp_node = fwd_comp_node
+                        encode_message(g, fwd_comp_node)
+                        
+                        print(f"[DEBUG] Add {fwd_comp_node}")
+                    
+                    prev_comp_node = None
+                    for idx, layer in enumerate(reversed(layers)):
+                        if (self.layer_types[idx] == "FP"):
+                            layer.bwd_ig_comp_node = None
+                            layer.bwd_wg_comp_node = None
+                            continue
+                            ## No backward
+                        elif (self.layer_types[idx] == "FP+IG"):
+                            wg_comp_node = None
+                            ig_comp_node = self.get_comp_node(
+                                layer.name, "BWD_IG",
+                                layer.bwd_ig_comp_time
+                            )
+                            if idx == 0:
+                                self.add_parent(ig_comp_node, fwd_comp_node)
+                            else:
+                                self.add_parent(ig_comp_node, prev_comp_node)
+                                
+                            prev_comp_node = ig_comp_node
+                            
+                            layer.bwd_ig_comp_node = ig_comp_node
+                            layer.bwd_wg_comp_node = None
+                            encode_message(g, ig_comp_node)
+                            
+                            print(f"[DEBUG] Add {ig_comp_node}")
+
+                        elif (self.layer_types[idx] == "FP+WG"):
+                            ig_comp_node = None
+                            wg_comp_node = self.get_comp_node(
+                                layer.name, "BWD_WG",
+                                layer.bwd_wg_comp_time
+                            )
+                            if idx == 0:
+                                self.add_parent(wg_comp_node, fwd_comp_node)
+                            else:
+                                self.add_parent(wg_comp_node, prev_comp_node)
+                                
+                            layer.bwd_ig_comp_node = None
+                            layer.bwd_wg_comp_node = wg_comp_node
+                            prev_comp_node = wg_comp_node
+                            
+                            encode_message(g, wg_comp_node)
+                            
+                            print(f"[DEBUG] Add {wg_comp_node}")
+                            
+                        elif (self.layer_types[idx] == "FP+IG+WG"):
+                            ig_comp_node = self.get_comp_node(
+                                layer.name, "BWD_IG",
+                                layer.bwd_ig_comp_time
+                            )
+                            wg_comp_node = self.get_comp_node(
+                                layer.name, "BWD_WG",
+                                layer.bwd_wg_comp_time
+                            )
+                            self.add_parent(ig_comp_node, wg_comp_node)
+                            if idx == 0:
+                                self.add_parent(wg_comp_node, fwd_comp_node)
+                            else:
+                                self.add_parent(wg_comp_node, prev_comp_node)
+                            
+                            prev_comp_node = ig_comp_node
+                            
+                            layer.bwd_ig_comp_node = ig_comp_node
+                            layer.bwd_wg_comp_node = wg_comp_node
+                            
+                            encode_message(g, ig_comp_node)
+                            encode_message(g, wg_comp_node)
+                            
+                            print(f"[DEBUG] Add {ig_comp_node}")
+                            print(f"[DEBUG] Add {wg_comp_node}")
+                        else:
+                            raise RuntimeError("Unknown compute type:", self.layer_types[idx])
+                # for layer in layers:
+                #     layer.bwd_wg_comp_node = None
 
     def convert_model_parallel(
         self,
